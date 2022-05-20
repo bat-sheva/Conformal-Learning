@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --mail-user=
+#SBATCH --partition=gpu
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:p100:1
+#SBATCH --time=01:00:00
+
+#module load python
+module purge
+module load gcc/8.3.0
+module load cuda/11.2.0
+module load cudnn/8.1.0.77-11.2-cuda
+source ~/.bashrc 
+eval "$(conda shell.bash hook)"
+conda activate expt
+# cd UncertaintyAware
+
+
+# Cross Entropy Loss
+# python train_cifar10.py --batch_size 128 --optimizer 'SGD' --num_epochs 1000 --lr 0.1 --mu 0.0 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 45000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --seed $seed
+# if return conformity scores (example)
+# python train_cifar10.py --batch_size 128 --optimizer 'SGD' --num_epochs 1500 --lr 0.1 --mu 0.0 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 10000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --return_scores True --save_pickle True --seed $seed
+
+# Cross Entropy sanity check: using 48k training data
+# python train_cifar10.py --batch_size 128 --optimizer 'SGD' --num_epochs 450 --lr 0.1 --mu 0.0 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 45000 --train_perc 0.0 --cal_perc 0.2 --bs_times 1 --seed $seed
+
+# Focal Loss
+# python train_cifar10.py --batch_size 128 --optimizer 'SGD' --num_epochs 1500 --lr 0.1 --mu 0.0 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 10000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --baseloss 'focalloss' --seed $seed
+
+# Hybrid Loss
+# python train_cifar10.py --batch_size 768 --optimizer 'Adam' --num_epochs 5000 --lr 0.001 --mu 0.0 --mu_size 0.2 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 10000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --seed $seed
+
+# So far best Prototype
+python train_cifar10.py --batch_size 768 --optimizer 'Adam' --num_epochs 10 --lr 0.001 --mu 0.1 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 3000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --seed $seed
+
+# Alternative Prototype
+# python train_cifar10.py --batch_size 768 --optimizer 'Adam' --num_epochs 5000 --lr 0.005 --mu 0.1 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 3000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --seed $seed
+# python train_cifar10.py --batch_size 768 --optimizer 'Adam' --num_epochs 5000 --lr 0.01 --mu 0.2 --mu_size 0 --train_alpha 0.1 --method 'RandomErasing' --scale 0.8 --n_tr_samples 3000 --train_perc 0.2 --cal_perc 0.2 --bs_times 1 --seed $seed

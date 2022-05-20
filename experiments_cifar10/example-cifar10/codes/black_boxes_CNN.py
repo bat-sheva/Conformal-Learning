@@ -1,35 +1,41 @@
-# BBox and net 
-   
-import sys
-import torch
 import pandas as pd
 import numpy as np
-
+import math 
+from scipy.stats.mstats import mquantiles
+from datetime import date
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import torchvision
+import torchvision.models as models
+import torchsort
+from torchsort import soft_rank, soft_sort
+import copy
+import os 
+from tqdm.autonotebook import tqdm
+from codes.resnet import ResNet18
+import pickle 
+import pdb
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-sys.path.append('./third_party/')
-if device.type == 'cuda': 
-  import torchsort
-  from torchsort import soft_rank, soft_sort 
-else:
-  from fast_soft_sort.pytorch_ops import soft_rank, soft_sort
-    
-    
-class ClassifierDataset(Dataset):
-    def __init__(self, X_data, y_data, z_data):
-        self.X_data = X_data
-        self.y_data = y_data
-        self.z_data = z_data
 
+
+# modify the dataset to add corruption flag
+class ConfDataset(Dataset):
+    def __init__(self, dataset_XY, Z):
+        self.dataset_XY = dataset_XY
+        self.Z = Z
+    
     def __getitem__(self, index):
-        return self.X_data[index], self.y_data[index], self.z_data[index]
+        X, Y = self.dataset_XY[index]
+        Z = self.Z[index]
+        return X, Y, Z
+      
+    def __len__(self):
+        return self.Z.shape[0]
 
-    def __len__ (self):
-        return len(self.X_data)
-     
-     
 def accuracy_point(y_pred, y_test):
     y_pred_softmax = torch.log_softmax(y_pred, dim = 1)
     _, y_pred_tags = torch.max(y_pred_softmax, dim = 1)
@@ -38,68 +44,48 @@ def accuracy_point(y_pred, y_test):
     acc = correct_pred.sum() / len(correct_pred)
 
     return acc*100
+
+def eval_predictions(test_loader, box, data="unknown", plot=False, predict_1=False):
+    if predict_1:
+        Y_pred = box.predict_1(test_loader)
+    else:
+        Y_pred = box.predict(test_loader)
     
+    Y_true = []
+    for X_batch, Y_batch, _ in test_loader:
+      Y_true.append(Y_batch.cpu().numpy()[0])
     
-class ClassNNet(nn.Module):
-    def __init__(self, num_features, num_classes, use_dropout=False):
-        super(ClassNNet, self).__init__()
+    if plot:
+        A = confusion_matrix(Y, Y_pred)
+        df_cm = pd.DataFrame(A, index = [i for i in range(K)], columns = [i for i in range(K)])
+        plt.figure(figsize = (4,3))
+        pal = sns.light_palette("navy", as_cmap=True)
+        sn.heatmap(df_cm, cmap=pal, annot=True, fmt='g')
 
-        self.use_dropout = use_dropout
+    class_error = np.mean(Y_true!=Y_pred)
+    print("Classification error on {:s} data: {:.1f}%".format(data, class_error*100))
+    return (class_error*100)
 
-        self.layer_1 = nn.Linear(num_features, 256)
-        self.layer_2 = nn.Linear(256, 256)
-        self.layer_3 = nn.Linear(256, 128)
-        self.layer_4 = nn.Linear(128, 64)
-        self.layer_5 = nn.Linear(64, num_classes)
+def cvm(u):
+  """
+  Compute the Cramer von Mises statistic for testing uniformity in distribution
+  """
+  n = len(u)
+  u_sorted = np.sort(u)
+  i_seq = (2.0*np.arange(1,1+n)-1.0)/(2.0*n)
+  stat = np.sum(np.square(i_seq - u_sorted)) + 1.0/(12.0*n)
+  return stat
 
-        self.z_dim = 256 + 128
+def KL(P,Q):
+    epsilon = 0.00001
+    P = P+epsilon
+    Q = Q+epsilon
+    divergence = np.sum(np.multiply(P,np.log(np.divide(P,Q))),1)
+    return divergence
 
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=0.2)
-        self.batchnorm1 = nn.BatchNorm1d(256)
-        self.batchnorm2 = nn.BatchNorm1d(256)
-        self.batchnorm3 = nn.BatchNorm1d(128)
-        self.batchnorm4 = nn.BatchNorm1d(64)
-
-    def forward(self, x, extract_features=False):
-        x = self.layer_1(x)
-        x = self.relu(x)
-        if self.use_dropout:
-          x = self.dropout(x)
-          x = self.batchnorm1(x)
-
-        z2 = self.layer_2(x)
-        x = self.relu(z2)
-        if self.use_dropout:
-          x = self.dropout(x)
-          x = self.batchnorm2(x)
-
-        z3 = self.layer_3(x)
-        x = self.relu(z3)
-        if self.use_dropout:
-          x = self.dropout(x)
-          x = self.batchnorm3(x)
-        x = self.layer_4(x)
-        x = self.relu(x)
-        
-        if self.use_dropout:
-            x = self.dropout(x)
-            x = self.batchnorm4(x)
-
-        x = self.layer_5(x)
-           
-        if extract_features:
-          return x, torch.cat([z2,z3],1)
-        else:
-          return x
-          
-          
-          
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# soft sorting and ranking
 REG_STRENGTH = 0.1
-B = 50        
-
-
+B = 50
 def soft_indicator(x, a, b=B):
   def sigmoid(x):
     return 1.0/(1.0 + np.exp(-x))
@@ -149,8 +135,9 @@ def compute_scores_diff(proba_values, Y_values, alpha=0.1):
     sizes_t = sizes_t + 1.0
     # Return the conformity scores and the estimated sizes (without randomization) at the desired alpha
     return scores_t, sizes_t
-    
-    
+
+
+# Conformal Loss function
 class UniformMatchingLoss(nn.Module):
   """ Custom loss function
   """
@@ -178,22 +165,10 @@ class UniformMatchingLoss(nn.Module):
     i_seq = torch.arange(1.0,1.0+batch_size,device=device)/(batch_size)
     out = torch.max(torch.abs(i_seq - x_sorted))
     return out
-    
-    
-    
-'''
-Implementation of Focal Loss.
-Reference:
-[1]  T.-Y. Lin, P. Goyal, R. Girshick, K. He, and P. Dollar, Focal loss for dense object detection.
-     arXiv preprint arXiv:1708.02002, 2017.
-'''
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
 
+# FocalLoss Loss function
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=0, size_average=True):
+    def __init__(self, gamma=0, size_average=False):
         super(FocalLoss, self).__init__()
         self.gamma = gamma
         self.size_average = size_average
@@ -213,36 +188,80 @@ class FocalLoss(nn.Module):
         loss = -1 * (1-pt)**self.gamma * logpt
         if self.size_average: return loss.mean()
         else: return loss.sum()
-        
-        
-    
+
+class FocalLossAdaptive(nn.Module):
+    def __init__(self, gamma=0, size_average=False, device=None):
+        super(FocalLossAdaptive, self).__init__()
+        self.size_average = size_average
+        self.gamma = gamma
+        self.device = device
+
+    def get_gamma_list(self, pt):
+        gamma_list = []
+        batch_size = pt.shape[0]
+        for i in range(batch_size):
+            pt_sample = pt[i].item()
+            if (pt_sample >= 0.5):
+                gamma_list.append(self.gamma)
+                continue
+            # Choosing the gamma for the sample
+            for key in sorted(gamma_dic.keys()):
+                if pt_sample < key:
+                    gamma_list.append(gamma_dic[key])
+                    break
+        return torch.tensor(gamma_list).to(self.device)
+
+    def forward(self, input, target):
+        if input.dim()>2:
+            input = input.view(input.size(0),input.size(1),-1)  # N,C,H,W => N,C,H*W
+            input = input.transpose(1,2)    # N,C,H*W => N,H*W,C
+            input = input.contiguous().view(-1,input.size(2))   # N,H*W,C => N*H*W,C
+        target = target.view(-1,1)
+        logpt = F.log_softmax(input, dim=1)
+        logpt = logpt.gather(1,target)
+        logpt = logpt.view(-1)
+        pt = logpt.exp()
+        gamma = self.get_gamma_list(pt)
+        loss = -1 * (1-pt)**gamma * logpt
+        if self.size_average: return loss.mean()
+        else: return loss.sum()
+
+# BlackBox method
 class BlackBox:
 
     def __init__(self, num_features, num_classes,
-                 family="classification", dropout=False, base_loss='CE', gamma=1):
+                 family="classification", 
+                 baseloss='crossentropy',
+                 model = 'resnet18',
+                 dropout=False):
+
         self.num_features = num_features
         self.num_classes = num_classes
         self.family = family
-                
-        # Define NNet model
-        self.model = ClassNNet(num_features = num_features, num_classes=num_classes, 
-                               use_dropout=dropout)
+        self.baseloss = baseloss
+
+        if model == 'resnet18':
+          self.model = ResNet18()
+        elif model == 'resnet50':
+          self.model = ResNet50()
 
         # Detect whether CUDA is available
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = device
         self.model = self.model.to(self.device)
 
         # Define loss functions
         if self.family=="classification":
-          if base_loss=='CE':
+          if self.baseloss == 'crossentropy':
             self.criterion_pred = nn.CrossEntropyLoss()
-          if base_loss=='Focal':
-            self.criterion_pred = FocalLoss(gamma=gamma)
+          elif self.baseloss =='focalloss':
+            self.criterion_pred = FocalLoss(gamma = 3, size_average = True)
+
+
         else:
           self.criterion_pred = nn.MSELoss()
+          
         self.criterion_scores = UniformMatchingLoss()
-
-        # How to compute probabilities
+                
         self.layer_prob = nn.Softmax(dim=1)
 
     def compute_loss_scores(self, y_train_pred, y_train_batch, alpha=0.1):
@@ -252,43 +271,27 @@ class BlackBox:
         train_loss_sizes = torch.mean(train_sizes)
         return train_loss_scores, train_loss_sizes
 
-    def fit(self, X_train, Y_train, Z_train = None, X_hout = None, Y_hout = None,
-            num_epochs=10, batch_size=16, lr=0.001, 
-            mu=0, mu_size=0, alpha=0.1, optimizer='Adam', cond_label=False,
+    def fit(self, train_loader, Z_train = None, estop_loader=None,
+            num_epochs=10, batch_size=16, lr=0.001, optimizer = 'Adam', 
+            mu=0, mu_size=0, alpha=0.1,  
             save_checkpoint_period=1, save_model=True, name=None, 
-            early_stopping=False, name_CP=None, verbose=True):            
-        """
-        X_train : feature matrix for input data used for training
-        Y_train : label vector for input data used for training
-        Z_train : group membership vector for input data used for training (optional)
-                  This determines how to group observations for conformal loss.
-                  Group 0 does not get processed by conformal loss. Default: all 0.
-        X_hout : feature matrix for input data used for hold-out evaluation (optional)
-        Y_hout:  label vector for input data used for hold-out evaluation (optional)
-        """
+            early_stopping=False, name_CP=None):            
 
         # Process input arguments
         if save_model:
           if name is None:
             raise("Output model name file is needed.")
 
-
         # Choose the optimizer
-        if optimizer=='Adam':
+        if optimizer == 'Adam':
           optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        if optimizer=='SGD':
+        elif optimizer == 'SGD':
           optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
 
         # Choose the learning rate scheduler
         lr_milestones = [int(num_epochs*0.5)]
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_milestones, gamma=0.1)
 
-        # Initialize loader for training data 
-        X_train = torch.from_numpy(X_train).float().to(self.device)
-        if self.family=="classification":
-          Y_train = torch.from_numpy(Y_train).long().to(self.device)
-        else:
-          Y_train = torch.from_numpy(Y_train).float().to(self.device)
 
         if Z_train is not None:
           # Check whether conformity scores need to be evaluated on training data
@@ -296,30 +299,9 @@ class BlackBox:
             eval_conf_train = True
           else:
             eval_conf_train = False
-          Z_train = torch.from_numpy(Z_train).long().to(self.device)
         else:
-          Z_train = torch.zeros(Y_train.shape).long().to(self.device)
           eval_conf_train = False
         
-        train_dataset = ClassifierDataset(X_train, Y_train, Z_train)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, 
-                                  shuffle=True, drop_last=True)
-
-        # Initialize loader for hold-out data (if available)
-        if ((X_hout is not None) and (Y_hout is not None)): 
-          X_hout = torch.from_numpy(X_hout).float().to(self.device)
-          if self.family=="classification":
-            Y_hout = torch.from_numpy(Y_hout).long().to(self.device)
-            Z_hout = torch.ones(Y_hout.shape).long().to(self.device)
-          else:
-            Y_hout = torch.from_numpy(Y_hout).float().to(self.device)
-            Z_hout = torch.zeros(Y_hout.shape).long().to(self.device)
-
-          estop_dataset = ClassifierDataset(X_hout, Y_hout, Z_hout)
-          estop_loader = DataLoader(dataset=estop_dataset, batch_size=batch_size, 
-                                    shuffle=True, drop_last=True)
-        else:
-          estop_loader = None
         
         # Initialize monitoring variables
         stats = {'epoch': [], 
@@ -332,8 +314,8 @@ class BlackBox:
         best_size = None
 
         # Training loop
-        print("Begin training.", flush=True)
-        for e in range(1, num_epochs+1):
+        print("Begin training.")
+        for e in tqdm(range(1, num_epochs+1)):
 
             epoch_acc = 0
             epoch_loss_ce = 0
@@ -349,6 +331,9 @@ class BlackBox:
             self.model.train()
 
             for X_batch, Y_batch, Z_batch in train_loader:
+                X_batch = X_batch.to(device)
+                Y_batch = Y_batch.to(device)
+                Z_batch = Z_batch.to(device)
                 optimizer.zero_grad()
 
                 # Important: make sure all the batches have the same size, because otherwise
@@ -372,17 +357,7 @@ class BlackBox:
                     if z > 0:
                       idx_z = torch.where(Z_batch==z)[0]
                       n_z = len(idx_z)
-                      if cond_label:
-                        Y_batch_z = Y_batch[idx_z]
-                        out_z = out[idx_z]
-                        idx_hard_scores = torch.nonzero(Y_batch_z).squeeze(1)
-                        idx_easy_scores = torch.nonzero(Y_batch_z-1).squeeze(1)
-                        loss_scores_z_hard, loss_sizes_z_hard = self.compute_loss_scores(out_z[idx_hard_scores], Y_batch_z[idx_hard_scores], alpha=alpha)
-                        loss_scores_z_easy, loss_sizes_z_easy = self.compute_loss_scores(out_z[idx_easy_scores], Y_batch_z[idx_easy_scores], alpha=alpha)
-                        loss_scores_z = loss_scores_z_hard + loss_scores_z_easy
-                        loss_sizes_z = loss_sizes_z_hard + loss_sizes_z_easy
-                      else:
-                        loss_scores_z, loss_sizes_z = self.compute_loss_scores(out[idx_z], Y_batch[idx_z], alpha=alpha)
+                      loss_scores_z, loss_sizes_z = self.compute_loss_scores(out[idx_z], Y_batch[idx_z], alpha=alpha)
                       loss_scores = loss_scores + loss_scores_z
                       loss_sizes = loss_sizes + loss_sizes_z
                   loss_scores = loss_scores / n_groups
@@ -412,12 +387,17 @@ class BlackBox:
             epoch_loss_scores /= len(train_loader)
             epoch_loss_sizes /= len(train_loader)
             epoch_loss /= len(train_loader)
+
             
             scheduler.step()
             self.model.eval()
 
             if estop_loader is not None:
               for X_batch, Y_batch, Z_batch in estop_loader:
+                  X_batch = X_batch.to(device)
+                  Y_batch = Y_batch.to(device)
+                  Z_batch = Z_batch.to(device)
+
                   out = self.model(X_batch)
 
                   # Evaluate CE loss
@@ -428,6 +408,7 @@ class BlackBox:
                   loss_scores = torch.tensor(0.0, device=device)
                   loss_sizes = torch.tensor(0.0, device=device)
                   n_groups = torch.sum(Z_groups>0)
+                  #pdb.set_trace()
                   for z in Z_groups:
                     if z > 0:
                       idx_z = torch.where(Z_batch==z)[0]
@@ -466,14 +447,14 @@ class BlackBox:
                   # Save model checkpoint if requested
                   if save_checkpoint:
                       saved_state = dict(
+                          stats=stats,  
                           best_loss=best_loss,
                           model_state=self.model.state_dict(),
                       )
                       torch.save(saved_state, name_CP+'loss')
-                      if verbose:
-                          print(
-                              f"*** Saved checkpoint loss at epoch {e}", flush=True
-                          )
+                      print(
+                          f"*** Saved checkpoint loss at epoch {e}", flush=True
+                      )
                       
                   # Early stopping by accuracy
                   save_checkpoint = True if best_acc is not None and best_acc < epoch_acc_hout and e % save_checkpoint_period == 0 else False
@@ -481,15 +462,42 @@ class BlackBox:
                   # Save model checkpoint if requested
                   if save_checkpoint:
                       saved_state = dict(
+                          stats=stats,
                           best_acc=best_acc,
                           model_state=self.model.state_dict(),
                       )
                       torch.save(saved_state, name_CP+'acc')
-                      if verbose:
-                          print(
-                              f"*** Saved checkpoint acc at epoch {e}", flush=True
-                          )
+                      print(
+                          f"*** Saved checkpoint acc at epoch {e}", flush=True
+                      )
 
+                  # # Early stopping by uniformity of conformity scores
+                  # save_checkpoint = True if best_conf is not None and best_conf > epoch_loss_scores_hout and e % save_checkpoint_period == 0 else False
+                  # best_conf = epoch_loss_scores_hout if best_conf is None or best_conf > epoch_loss_scores_hout else best_conf
+                  # # Save model checkpoint if requested
+                  # if save_checkpoint:
+                  #     saved_state = dict(
+                  #         best_conf=best_conf,
+                  #         model_state=self.model.state_dict(),
+                  #     )
+                  #     torch.save(saved_state, name_CP+'conf')
+                  #     print(
+                  #         f"*** Saved checkpoint conf at epoch {e}", flush=True
+                  #     )
+
+                  # # Early stopping by size of 90% prediction sets
+                  # save_checkpoint = True if best_size is not None and best_size > epoch_loss_sizes_hout and e % save_checkpoint_period == 0 else False
+                  # best_size = epoch_loss_sizes_hout if best_size is None or best_size > epoch_loss_sizes_hout else best_size
+                  # # Save model checkpoint if requested
+                  # if save_checkpoint:
+                  #     saved_state = dict(
+                  #         best_size=best_size,
+                  #         model_state=self.model.state_dict(),
+                  #     )
+                  #     torch.save(saved_state, name_CP+'size')
+                  #     print(
+                  #         f"*** Saved checkpoint size at epoch {e}", flush=True
+                  #     )
                                 
             stats['epoch'].append(e)
             stats['pred'].append(epoch_loss_ce)
@@ -503,21 +511,20 @@ class BlackBox:
             stats['sizes-estop'].append(epoch_loss_sizes_hout)
             stats['loss-estop'].append(epoch_loss_hout)
 
-            
-            if verbose:
-                print(f'Epoch {e+0:03}: | CE: {epoch_loss_ce:.3f} | ', end='')
-                if eval_conf_train > 0:
-                  print(f'Scores: {epoch_loss_scores:.3f} | ', end='')
-                  print(f'Sizes: {epoch_loss_sizes:.3f} | ', end='')
-                print(f'Loss: {epoch_loss:.3f} | ', end='')
-                print(f'Acc: {epoch_acc:.3f} | ', end='')
-                if estop_loader is not None:
-                  print(f'CE-ho: {epoch_loss_ce_hout:.3f} | ', end='')
-                  print(f'CS-ho: {epoch_loss_scores_hout:.3f} | ', end='')
-                  print(f'Sizes-ho: {epoch_loss_sizes_hout:.3f} | ', end='')
-                  print(f'Loss-ho: {epoch_loss_hout:.3f} | ', end='')
-                  print(f'Acc-ho: {epoch_acc_hout:.3f}', end='')
-                print('',flush=True)
+
+            print(f'Epoch {e+0:03}: | CE: {epoch_loss_ce:.3f} | ', end='')
+            if eval_conf_train > 0:
+              print(f'Scores: {epoch_loss_scores:.3f} | ', end='')
+              print(f'Sizes: {epoch_loss_sizes:.3f} | ', end='')
+            print(f'Loss: {epoch_loss:.3f} | ', end='')
+            print(f'Acc: {epoch_acc:.3f} | ', end='')
+            if estop_loader is not None:
+              print(f'CE-ho: {epoch_loss_ce_hout:.3f} | ', end='')
+              print(f'CS-ho: {epoch_loss_scores_hout:.3f} | ', end='')
+              print(f'Sizes-ho: {epoch_loss_sizes_hout:.3f} | ', end='')
+              print(f'Loss-ho: {epoch_loss_hout:.3f} | ', end='')
+              print(f'Acc-ho: {epoch_acc_hout:.3f}', end='')
+            print('',flush=True)
             
         saved_final_state = dict(stats=stats,
                                  model_state=self.model.state_dict(),
@@ -527,20 +534,17 @@ class BlackBox:
             
         return stats
 
-    def predict(self, X_test):
-        y_test = np.zeros((X_test.shape[0],))
-        test_dataset = ClassifierDataset(torch.from_numpy(X_test).float(), 
-                                         torch.from_numpy(y_test).long(),
-                                         torch.ones(y_test.shape).long())
-        
-        test_loader = DataLoader(dataset=test_dataset, batch_size=100)
+    def predict(self, test_loader, return_y_true = None):
 
         y_pred_list = []
+        y_true = []
+
         with torch.no_grad():
             self.model.eval()
-            for X_batch, _, _ in test_loader:
+            for X_batch, Y_batch, _ in test_loader:
                 X_batch = X_batch.to(self.device)
                 y_test_pred = self.model(X_batch)
+                y_true.append(Y_batch.cpu().numpy()[0])
                 if self.family=="classification":
                   y_pred_softmax = torch.log_softmax(y_test_pred, dim = 1)
                   _, y_pred_tags = torch.max(y_pred_softmax, dim = 1)
@@ -548,29 +552,92 @@ class BlackBox:
                 else:
                   y_pred_list.append(y_test_pred.cpu().numpy())
         y_pred = np.concatenate(y_pred_list)
-        return y_pred
+        
+        if return_y_true:
+          return (y_pred, np.array(y_true))
+        else:
+          return y_pred
 
-    def predict_proba(self, X_test):
-        y_test = np.zeros((X_test.shape[0],))
-        test_dataset = ClassifierDataset(torch.from_numpy(X_test).float(), 
-                                         torch.from_numpy(y_test).long(),
-                                         torch.ones(y_test.shape).long())
-        test_loader = DataLoader(dataset=test_dataset, batch_size=100)
+    def predict_proba(self, test_loader, return_y_true = None):
 
         y_proba_list = []
+        y_true = []
+
         with torch.no_grad():
             self.model.eval()
-            for X_batch, _, _ in test_loader:
+            for X_batch, Y_batch, _ in test_loader:
+                y_true.append(Y_batch.cpu().numpy()[0])
                 X_batch = X_batch.to(self.device)
                 y_test_pred = self.model(X_batch)
                 y_proba_softmax = torch.softmax(y_test_pred, dim = 1)
                 y_proba_list.append(y_proba_softmax.cpu().numpy())
         prob = np.concatenate(y_proba_list)
         prob = prob / prob.sum(axis=1)[:,None]
-        return prob
-        
-        
-        
 
+        if return_y_true:
+          return (prob, np.array(y_true))
+
+        else:
+          return prob
+
+
+class BlackBox2:
+
+    def __init__(self, num_features, num_classes, box_extract_features=None, feature_augmentation=True):
+        self.num_features = num_features
+        self.num_classes = num_classes
+        self.feature_augmentation = feature_augmentation
+
+        # Define the two separate black-boxes 
+        self.box_1 = BlackBox(num_features, num_classes)
+        if feature_augmentation:
+          num_features_2 = num_features + self.box_1.model.z_dim
+        else:
+          num_features_2 = num_features
+        self.box_2 = BlackBox(num_features_2, num_classes)
+        if box_extract_features is not None:
+            self.box_extract_features = box_extract_features.box_1
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+    def fit_1(self, train_loader, estop_loader, optimizer = 'Adam', 
+              num_epochs=10, batch_size=16, lr=0.001, mu=0, mu_size=0, alpha=0.1,
+              save_model=False, save_checkpoint_period=1, name=None, early_stopping=False, name_CP=None):            
         
-                
+        stats = self.box_1.fit(train_loader, estop_loader=estop_loader, 
+                               num_epochs=num_epochs, batch_size=batch_size, lr=lr,
+                               mu=mu, mu_size=mu_size, alpha=0.1, optimizer = optimizer, 
+                               save_model=save_model, name=name, early_stopping=early_stopping, 
+                               save_checkpoint_period=save_checkpoint_period, name_CP=name_CP+'_init')
+        return stats
+            
+    
+    def fit_2(self, train_loader, estop_loader=None,
+              Z_train = None, optimizer = 'Adam',
+              num_epochs=10, batch_size=16, lr=0.001, 
+              mu=0, mu_size=0, alpha=0.1,
+              save_model=False, save_checkpoint_period=1, name=None, early_stopping=False, name_CP=None):            
+        
+        stats = self.box_2.fit(train_loader, estop_loader=estop_loader,
+                               Z_train=Z_train, optimizer = optimizer, 
+                               num_epochs=num_epochs, batch_size=batch_size, lr=lr, 
+                               mu=mu, mu_size=mu_size, alpha=alpha,
+                               save_model=save_model, name=name, early_stopping=early_stopping, 
+                               save_checkpoint_period=save_checkpoint_period, name_CP=name_CP)
+
+        return stats
+
+    def predict_1(self, teat_loader, return_y_true = None):
+        return self.box_1.predict(teat_loader, return_y_true = return_y_true)
+
+    def predict(self, teat_loader, return_y_true = None):
+
+        return self.box_2.predict(teat_loader, return_y_true = return_y_true)
+
+    def predict_proba_1(self, teat_loader, return_y_true = None):
+        return self.box_1.predict_proba(teat_loader, return_y_true = return_y_true)
+
+    def predict_proba(self, teat_loader, return_y_true = None):
+
+        return self.box_2.predict_proba(teat_loader, return_y_true = return_y_true)
+

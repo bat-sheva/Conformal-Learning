@@ -1,0 +1,7 @@
+saved_models/trained_with_blurred_new/*
+saved_models/trained_with_blurred_new2/*
+saved_models/*
+*.pth
+*.csv
+codes/__pycache__/*
+*.out
