@@ -21,7 +21,7 @@ date = date.today().strftime("%m-%d-%Y")
 
 # import self-defined or third-party packages
 import torchsort
-from codes import Splitconformal_CNN, black_boxes_CNN, evaluations_CNN, resnet
+from conformal_learning import Splitconformal_CNN, black_boxes_CNN, evaluations_CNN, resnet
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
