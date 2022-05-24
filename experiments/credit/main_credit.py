@@ -10,7 +10,7 @@ from bbox import BlackBox
 from split_conf import SplitConformal, evaluate_predictions, ProbAccum
 from auxiliary import eval_predictions, KL, cvm
 
-sys.path.append('../../third_party/')
+sys.path.append('../../conformal_learning/third_party/')
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
