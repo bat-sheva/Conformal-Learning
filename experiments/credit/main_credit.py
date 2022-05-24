@@ -5,12 +5,12 @@ import random
 import pandas as pd
 import numpy as np
 
-sys.path.append('./codes/')
+sys.path.append('../../conformal_learning/')
 from bbox import BlackBox
 from split_conf import SplitConformal, evaluate_predictions, ProbAccum
 from auxiliary import eval_predictions, KL, cvm
 
-sys.path.append('./third_party/')
+sys.path.append('../../third_party/')
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
