@@ -72,7 +72,7 @@ class SplitConformal:
     # Fit model
     self.bbox.fit(X, Y)
 
-  def calibrate(self, X, Y, alpha, bbox=None, return_scores=False, no_calib=False):
+  def calibrate(self, X, Y, alpha, bbox=None, return_scores=False, no_calib=False, print_alpha=True):
     if bbox is not None:
       self.bbox = bbox
 
@@ -90,7 +90,8 @@ class SplitConformal:
     self.alpha_calibrated = 1.0 - tau
     if no_calib:
       self.alpha_calibrated = alpha
-    print("Calibrated alpha nominal {:.3f}: {:.3f}".format(alpha, self.alpha_calibrated))
+    if print_alpha:
+      print("Calibrated alpha nominal {:.3f}: {:.3f}".format(alpha, self.alpha_calibrated))
 
 
   def fit_calibrate(self, X, Y, alpha, bbox=None, random_state=2020, verbose=False):

@@ -25,8 +25,8 @@ def experiment(seed):
     np.random.seed(seed)
 
     gamma = 1
-    mu = 0.1
-    batch_size_new = 1500
+    mu = 0.2
+    batch_size_new = 2500
     prc_score = 0.3
     
     files_dir = './saved_models_credit' 
