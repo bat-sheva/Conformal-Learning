@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-sys.path.append('../third_party/')
+sys.path.append('./third_party/')
 if device.type == 'cuda': 
   import torchsort
   from torchsort import soft_rank, soft_sort 
