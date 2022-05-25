@@ -17,8 +17,10 @@ after exact conformal calibration with hold-out data, compared to state-of-the-a
 
 
 ### Contents
-•	experiments_cifar10/ : Code for the experiments with CIFAR-10 dataset.\
-•	experiments_credit_synthetic_data/ : Code for the experiments with the credit card data and the synthetic data.
+•	conformal_learning/ : Python package implementing our methods and some alternative benchmarks.\
+•	examples/ : Notebooks that visualize the synthetic and credit data experiments with one seed only.\
+•	experiments/ : Three directories containing the code for conducting the experiments with CIFAR-10, credit card and the synthetic data.\
+For credit and synthetic data run 'main' file in order to run experiments and reproduce results from the paper. 'Run_all' and 'submit' files run the main file with different seeds (and also varying parameters for the synthetic data) on the clusters. 'Show_results' notebook visualizes the results achieved in these experiments and create the figures presented in the paper.
 
 ### Prerequisites
 Python package dependencies:
@@ -32,6 +34,8 @@ Python package dependencies:
 •	os\
 •	sklearn\
 •	torchsort\
+•	random\
+•	seaborn\
 •	scipy
 
 The code for the numerical experiments was written to be run on a computing cluster using the SLURM scheduler.
